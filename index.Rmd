@@ -1,0 +1,190 @@
+---
+title: "project of practical machine learning in week 4"
+author: "GAN LING"
+date: "2017/3/14"
+output: html_document
+---
+
+# Prepare the datasets
+
+Read the training data into a data table.
+
+```{r}
+require(data.table)
+url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+mydata <- fread(url)
+```
+
+Read the testing data into a data table.
+
+```{r}
+url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+mydataTest <- fread(url)
+```
+
+Which variables in the test dataset have zero `NA`s?
+
+Here, we assume that Belt, arm, dumbbell, and forearm variables that do not have any missing values in the test dataset will be **predictor candidates**.
+
+```{r}
+isAnyMissing <- sapply(mydataTest, function (x) any(is.na(x) | x == ""))
+isPredictor <- !isAnyMissing & grepl("belt|[^(fore)]arm|dumbbell|forearm", names(isAnyMissing))
+Candidates <- names(isAnyMissing)[isPredictor]
+Candidates
+```
+
+Subset the primary dataset to include only the **predictor candidates** and the outcome variable, `classe`.
+
+```{r}
+combinevar <- c(Candidates, "classe")
+mydata <- mydata[, combinevar, with=FALSE]
+dim(mydata)
+names(mydata)
+```
+
+Make `classe` into a factor.
+
+```{r}
+mydata$classe <- factor(mydata$classe)
+mydata[, .N, classe]
+```
+
+Split the dataset into a 60% training and 40% probing dataset.
+
+```{r}
+require(caret)
+seed <- as.numeric(as.Date("2017-03-14"))
+set.seed(seed)
+inTrain <- createDataPartition(mydata$classe, p=0.6)
+mydataTrain <- mydata[inTrain[[1]]]
+mydataValidation <- mydata[-inTrain[[1]]]
+```
+
+Preprocess the prediction variables by centering and scaling.
+
+```{r}
+X <- mydataTrain[, Candidates, with=FALSE]
+preProcRes <- preProcess(X)
+preProcRes
+XCS <- predict(preProcRes, X)
+mydataTrainCS <- data.table(data.frame(classe = mydataTrain[, classe], XCS))
+```
+
+Apply the centering and scaling to the probing dataset.
+
+```{r}
+X <- mydataValidation[, Candidates, with=FALSE]
+XCS <- predict(preProcRes, X)
+mydataValidationCS <- data.table(data.frame(classe = mydataValidation[, classe], XCS))
+```
+
+Check for near zero variance.
+
+```{r}
+nzvCheck <- nearZeroVar(mydataTrainCS, saveMetrics=TRUE)
+if (any(nzvCheck$nzvCheck)) nzvCheck else message("No variables with near zero variance")
+```
+
+Examine groups of prediction variables.
+
+```{r histGroup}
+histGroup <- function (data, regex) {
+  col <- grep(regex, names(data))
+  col <- c(col, which(names(data) == "classe"))
+  require(reshape2)
+  n <- nrow(data)
+  mydataMelted <- melt(data[, col, with=FALSE][, rownum := seq(1, n)], id.vars=c("rownum", "classe"))
+  require(ggplot2)
+  ggplot(mydataMelted, aes(x=classe, y=value)) +
+    geom_violin(aes(color=classe, fill=classe), alpha=1/2) +
+    facet_wrap(~ variable, scale="free_y") +
+    scale_color_brewer(palette="Spectral") +
+    scale_fill_brewer(palette="Spectral") +
+    labs(x="", y="") +
+    theme(legend.position="none")
+}
+histGroup(mydataTrainCS, "belt")
+histGroup(mydataTrainCS, "[^(fore)]arm")
+histGroup(mydataTrainCS, "dumbbell")
+histGroup(mydataTrainCS, "forearm")
+```
+
+
+# Train a prediction model
+
+Using random forest, the out of sample error should be small.
+The error will be estimated using the 40% validation sample.
+
+Set up the parallel clusters.
+
+```{r}
+require(parallel)
+require(doParallel)
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+```
+
+Set the control parameters.
+
+```{r}
+ctrl <- trainControl(classProbs=TRUE,
+                     savePredictions=TRUE,
+                     allowParallel=TRUE)
+```
+
+Fit model over the tuning parameters. This command will cost so many time to run
+
+```{r}
+trainingModel <- train(classe ~ ., data=mydataTrainCS, method="rf")
+```
+
+Stop the clusters.
+```{r}
+stopCluster(cl)
+```
+
+## Evaluate the model on the training dataset
+
+```{r}
+trainingModel
+prediction <- predict(trainingModel, mydataTrainCS)
+confusionMatrix(prediction, mydataTrain[, classe])
+```
+
+## Evaluate the model on the validation dataset
+
+```{r}
+prediction <- predict(trainingModel, mydataValidationCS)
+confusionMatrix(prediction, mydataValidationCS[, classe])
+```
+
+## Display the final model
+
+```{r finalModel}
+varImp(trainingModel)
+trainingModel$finalModel
+```
+**I think that estimated error rate should be less than 1%** 
+Save training model object for later.
+
+```{r}
+save(trainingModel, file="trainingModel.RData")
+```
+
+
+# Predict on the test data
+
+Load the training model.
+
+```{r}
+load(file="trainingModel.RData", verbose=TRUE)
+```
+
+Get predictions and evaluate.
+
+```{r}
+mydataTestCS <- predict(preProcRes, mydataTest[, Candidates, with=FALSE])
+prediction <- predict(trainingModel, mydataTestCS)
+mydataTest <- cbind(prediction , mydataTest)
+subset(mydataTest, select=names(mydataTest)[grep("belt|[^(fore)]arm|dumbbell|forearm", names(mydataTest), invert=TRUE)])
+```
